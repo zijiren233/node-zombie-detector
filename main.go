@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
+	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
@@ -175,7 +175,7 @@ func (m *Monitor) checkNodes(ctx context.Context, nodeStatus map[string]*NodeSta
 	}
 
 	// 创建指标映射
-	metricsMap := make(map[string]*v1beta1.NodeMetrics)
+	metricsMap := make(map[string]*metricsv1beta1.NodeMetrics)
 	if nodeMetrics != nil {
 		for _, item := range nodeMetrics.Items {
 			metricsMap[item.Name] = &item
@@ -215,7 +215,7 @@ func (m *Monitor) cleanupDeletedNodes(
 	}
 }
 
-// getOrCreateNodeStatus 获取或创建节点状态（线程安全）
+// getOrCreateNodeStatus 获取或创建节点状态
 func (m *Monitor) getOrCreateNodeStatus(
 	nodeName string,
 	nodeStatus map[string]*NodeStatus,
@@ -237,7 +237,7 @@ func (m *Monitor) getOrCreateNodeStatus(
 func (m *Monitor) checkNode(
 	ctx context.Context,
 	node *v1.Node,
-	metrics *v1beta1.NodeMetrics,
+	metrics *metricsv1beta1.NodeMetrics,
 	nodeStatus map[string]*NodeStatus,
 ) error {
 	nodeName := node.Name
