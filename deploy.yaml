@@ -7,8 +7,8 @@ data:
   CLUSTER_NAME: ""
   FEISHU_WEBHOOK_URL: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
   CHECK_INTERVAL: "30s" # 检查间隔
-  ALERT_THRESHOLD: "3m" # 触发告警的阈值
-  ALERT_INTERVAL: "30m" # 重复告警的最小间隔
+  ALERT_THRESHOLD: "1m" # 触发告警的阈值
+  ALERT_INTERVAL: "10m" # 重复告警的最小间隔
 ---
 apiVersion: apps/v1
 kind: Deployment
