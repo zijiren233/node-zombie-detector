@@ -27,11 +27,11 @@ type NodeStatus struct {
 	AlertCount          int // 告警次数统计
 }
 
-// FeishuMessage 飞书消息结构
-type FeishuMessage struct {
-	MsgType string         `json:"msg_type"`
-	Content map[string]any `json:"content"`
-}
+const (
+	defaultCheckInterval  = 30 * time.Second
+	defaultAlertThreshold = 3 * time.Minute
+	defaultAlertInterval  = 10 * time.Minute
+)
 
 // Monitor K8s节点监控器
 type Monitor struct {
@@ -105,9 +105,9 @@ func NewMonitor(
 		metricsClientset: metricsClientset,
 		nodeStatus:       make(map[string]*NodeStatus),
 		feishuWebhook:    feishuWebhook,
-		checkInterval:    30 * time.Second,
-		alertThreshold:   3 * time.Minute,
-		alertInterval:    30 * time.Minute,
+		checkInterval:    defaultCheckInterval,
+		alertThreshold:   defaultAlertThreshold,
+		alertInterval:    defaultAlertInterval,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -266,6 +266,12 @@ func isNodeReady(node *v1.Node) bool {
 	}
 
 	return false
+}
+
+// FeishuMessage 飞书消息结构
+type FeishuMessage struct {
+	MsgType string         `json:"msg_type"`
+	Content map[string]any `json:"content"`
 }
 
 const alertFormat = "⚠️ **节点监控告警**\n\n" +

@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-zombie-detector-config
+  namespace: kube-system
+data:
+  CLUSTER_NAME: ""
+  FEISHU_WEBHOOK_URL: "https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
+  CHECK_INTERVAL: "30s" # 检查间隔
+  ALERT_THRESHOLD: "3m" # 触发告警的阈值
+  ALERT_INTERVAL: "30m" # 重复告警的最小间隔
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-zombie-detector
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-zombie-detector
+  template:
+    metadata:
+      labels:
+        app: node-zombie-detector
+    spec:
+      serviceAccountName: node-zombie-detector
+      containers:
+        - name: detector
+          image: ghcr.io/zijiren233/node-zombie-detector:latest
+          envFrom:
+            - configMapRef:
+                name: node-zombie-detector-config
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-zombie-detector
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-zombie-detector
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-zombie-detector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-zombie-detector
+subjects:
+  - kind: ServiceAccount
+    name: node-zombie-detector
+    namespace: kube-system
