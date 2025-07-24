@@ -31,8 +31,8 @@
 | `CLUSTER_NAME` | 集群名称 | 可选 | `default` |
 | `FEISHU_WEBHOOK_URL` | 飞书机器人 Webhook URL | 必填 | `https://open.feishu.cn/open-apis/bot/v2/hook/xxx` |
 | `CHECK_INTERVAL` | 检查节点状态的间隔 | `30s` | `1m`, `30s` |
-| `ALERT_THRESHOLD` | 无 metrics 多久后触发告警 | `3m` | `3m`, `180s` |
-| `ALERT_INTERVAL` | 同一节点重复告警的最小间隔 | `30m` | `10m`, `600s` |
+| `ALERT_THRESHOLD` | 无 metrics 多久后触发告警 | `1m` | `3m`, `180s` |
+| `ALERT_INTERVAL` | 同一节点重复告警的最小间隔 | `5m` | `10m`, `600s` |
 
 ## 告警示例
 

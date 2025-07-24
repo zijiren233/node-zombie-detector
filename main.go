@@ -16,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
 )
@@ -29,8 +31,11 @@ type NodeStatus struct {
 
 const (
 	defaultCheckInterval  = 30 * time.Second
-	defaultAlertThreshold = 3 * time.Minute
-	defaultAlertInterval  = 10 * time.Minute
+	defaultAlertThreshold = time.Minute
+	defaultAlertInterval  = 5 * time.Minute
+	defaultLeaseDuration  = 15 * time.Second
+	defaultRenewDeadline  = 10 * time.Second
+	defaultRetryPeriod    = 2 * time.Second
 )
 
 // Monitor K8s节点监控器
@@ -38,7 +43,6 @@ type Monitor struct {
 	clusterName      string
 	clientset        *kubernetes.Clientset
 	metricsClientset *metricsclientset.Clientset
-	nodeStatus       map[string]*NodeStatus
 	feishuWebhook    string
 	checkInterval    time.Duration
 	alertThreshold   time.Duration
@@ -103,7 +107,6 @@ func NewMonitor(
 	m := Monitor{
 		clientset:        clientset,
 		metricsClientset: metricsClientset,
-		nodeStatus:       make(map[string]*NodeStatus),
 		feishuWebhook:    feishuWebhook,
 		checkInterval:    defaultCheckInterval,
 		alertThreshold:   defaultAlertThreshold,
@@ -127,7 +130,8 @@ func (m *Monitor) Start(ctx context.Context) {
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()
 
-	m.checkNodes(ctx)
+	nodeStatus := make(map[string]*NodeStatus)
+	m.checkNodes(ctx, nodeStatus)
 
 	for {
 		select {
@@ -135,13 +139,13 @@ func (m *Monitor) Start(ctx context.Context) {
 			log.Println("Stopping node monitor...")
 			return
 		case <-ticker.C:
-			m.checkNodes(ctx)
+			m.checkNodes(ctx, nodeStatus)
 		}
 	}
 }
 
 // checkNodes 检查所有节点状态
-func (m *Monitor) checkNodes(ctx context.Context) {
+func (m *Monitor) checkNodes(ctx context.Context, nodeStatus map[string]*NodeStatus) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -160,7 +164,7 @@ func (m *Monitor) checkNodes(ctx context.Context) {
 	}
 
 	// 清理已删除节点的状态
-	m.cleanupDeletedNodes(activeNodes)
+	m.cleanupDeletedNodes(activeNodes, nodeStatus)
 
 	nodeMetrics, err := m.metricsClientset.MetricsV1beta1().
 		NodeMetricses().
@@ -186,30 +190,44 @@ func (m *Monitor) checkNodes(ctx context.Context) {
 			continue
 		}
 
-		m.checkNode(ctx, &node, metricsMap[node.Name])
+		err := m.checkNode(
+			ctx,
+			&node,
+			metricsMap[node.Name],
+			nodeStatus,
+		)
+		if err != nil {
+			log.Printf("Error checking node %s: %v", node.Name, err)
+		}
 	}
 }
 
 // cleanupDeletedNodes 清理已删除节点的状态
-func (m *Monitor) cleanupDeletedNodes(activeNodes map[string]bool) {
-	for nodeName := range m.nodeStatus {
+func (m *Monitor) cleanupDeletedNodes(
+	activeNodes map[string]bool,
+	nodeStatus map[string]*NodeStatus,
+) {
+	for nodeName := range nodeStatus {
 		if !activeNodes[nodeName] {
-			delete(m.nodeStatus, nodeName)
+			delete(nodeStatus, nodeName)
 			log.Printf("Cleaned up status for deleted node: %s", nodeName)
 		}
 	}
 }
 
 // getOrCreateNodeStatus 获取或创建节点状态（线程安全）
-func (m *Monitor) getOrCreateNodeStatus(nodeName string) *NodeStatus {
-	status, exists := m.nodeStatus[nodeName]
+func (m *Monitor) getOrCreateNodeStatus(
+	nodeName string,
+	nodeStatus map[string]*NodeStatus,
+) *NodeStatus {
+	status, exists := nodeStatus[nodeName]
 	if !exists {
 		status = &NodeStatus{
 			LastSeenWithMetrics: time.Now(),
 			LastAlertTime:       time.Time{}, // 零值
 			AlertCount:          0,
 		}
-		m.nodeStatus[nodeName] = status
+		nodeStatus[nodeName] = status
 	}
 
 	return status
@@ -220,12 +238,13 @@ func (m *Monitor) checkNode(
 	ctx context.Context,
 	node *v1.Node,
 	metrics *v1beta1.NodeMetrics,
-) {
+	nodeStatus map[string]*NodeStatus,
+) error {
 	nodeName := node.Name
 	hasMetrics := metrics != nil
 
 	// 获取或创建节点状态
-	status := m.getOrCreateNodeStatus(nodeName)
+	status := m.getOrCreateNodeStatus(nodeName, nodeStatus)
 
 	// 如果节点有指标，更新最后看到指标的时间
 	if hasMetrics {
@@ -235,26 +254,32 @@ func (m *Monitor) checkNode(
 			nodeName,
 			metrics.Usage.Cpu().String(),
 			metrics.Usage.Memory().String())
-	} else {
-		// 只有在 API 正常但节点没有指标时才记录
-		log.Printf("Node %s: Metrics=<unknown> (API is working)", nodeName)
+
+		return nil
 	}
 
-	// 检查是否需要告警（只在 metrics API 正常工作时）
-	if !hasMetrics {
-		timeSinceLastMetrics := time.Since(status.LastSeenWithMetrics)
-		timeSinceLastAlert := time.Since(status.LastAlertTime)
+	// 只有在 API 正常但节点没有指标时才记录
+	log.Printf("Node %s: Metrics=<unknown> (API is working)", nodeName)
 
-		if timeSinceLastMetrics >= m.alertThreshold {
-			// 避免重复告警
-			if status.LastAlertTime.IsZero() || timeSinceLastAlert >= m.alertInterval {
-				m.sendAlert(ctx, nodeName, timeSinceLastMetrics)
+	timeSinceLastMetrics := time.Since(status.LastSeenWithMetrics)
 
-				status.LastAlertTime = time.Now()
-				status.AlertCount++
-			}
-		}
+	if timeSinceLastMetrics < m.alertThreshold {
+		return nil
 	}
+
+	timeSinceLastAlert := time.Since(status.LastAlertTime)
+
+	// 避免重复告警
+	if !status.LastAlertTime.IsZero() && timeSinceLastAlert < m.alertInterval {
+		return nil
+	}
+
+	err := m.sendAlert(ctx, nodeName, timeSinceLastMetrics, status)
+
+	status.LastAlertTime = time.Now()
+	status.AlertCount++
+
+	return err
 }
 
 // isNodeReady 检查节点是否处于 Ready 状态
@@ -304,8 +329,13 @@ const alertFormatWithCluster = "⚠️ **节点监控告警**\n\n" +
 	"**告警次数**: 第 %d 次"
 
 // sendAlert 发送飞书告警
-func (m *Monitor) sendAlert(ctx context.Context, nodeName string, duration time.Duration) {
-	alertCount := m.nodeStatus[nodeName].AlertCount + 1
+func (m *Monitor) sendAlert(
+	ctx context.Context,
+	nodeName string,
+	duration time.Duration,
+	status *NodeStatus,
+) error {
+	alertCount := status.AlertCount + 1
 
 	var message string
 	if m.clusterName != "" {
@@ -336,8 +366,7 @@ func (m *Monitor) sendAlert(ctx context.Context, nodeName string, duration time.
 
 	jsonData, err := json.Marshal(feishuMsg)
 	if err != nil {
-		log.Printf("Error marshaling feishu message: %v", err)
-		return
+		return fmt.Errorf("error marshaling feishu message: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -347,32 +376,31 @@ func (m *Monitor) sendAlert(ctx context.Context, nodeName string, duration time.
 		bytes.NewReader(jsonData),
 	)
 	if err != nil {
-		log.Printf("Error creating http request: %v", err)
-		return
+		return fmt.Errorf("error creating http request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		log.Printf("Error sending feishu alert: %v", err)
-		return
+		return fmt.Errorf("error sending feishu alert: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		var body bytes.Buffer
-
-		_, err := body.ReadFrom(resp.Body)
-		if err != nil {
-			log.Printf("Error reading feishu response body: %v", err)
-		}
-
-		log.Printf("Feishu webhook returned status code: %d, body: %s",
-			resp.StatusCode, body.String())
-	} else {
-		log.Printf("Alert sent successfully for node %s (alert #%d)", nodeName, alertCount)
+	if resp.StatusCode >= http.StatusOK &&
+		resp.StatusCode < http.StatusMultipleChoices {
+		return nil
 	}
+
+	var body bytes.Buffer
+
+	_, err = body.ReadFrom(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading feishu response body: %w", err)
+	}
+
+	return fmt.Errorf("feishu webhook returned status code: %d, body: %s",
+		resp.StatusCode, body.String())
 }
 
 // handleSignals 处理系统信号
@@ -397,6 +425,88 @@ func getEnvDuration(key string) time.Duration {
 	}
 
 	return 0
+}
+
+const leaseName = "node-zombie-detector"
+
+// runWithLeaderElection 运行带有选主的监控器
+func runWithLeaderElection(
+	ctx context.Context,
+	monitor *Monitor,
+) {
+	podName := os.Getenv("POD_NAME")
+
+	podNamespace := os.Getenv("POD_NAMESPACE")
+	if podName == "" || podNamespace == "" {
+		log.Println("run with leader election is disabled")
+		monitor.Start(ctx)
+		return
+	}
+
+	// 创建选主锁
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta: metav1.ObjectMeta{
+			Name:      leaseName,
+			Namespace: podNamespace,
+		},
+		Client: monitor.clientset.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{
+			Identity: podName,
+		},
+	}
+
+	// 配置选主
+	leaderElectionConfig := leaderelection.LeaderElectionConfig{
+		Lock:          lock,
+		LeaseDuration: defaultLeaseDuration,
+		RenewDeadline: defaultRenewDeadline,
+		RetryPeriod:   defaultRetryPeriod,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(ctx context.Context) {
+				log.Println("Became leader, starting monitoring...")
+				monitor.Start(ctx)
+			},
+			OnStoppedLeading: func() {
+				log.Println("Lost leadership, stopping monitoring...")
+			},
+			OnNewLeader: func(identity string) {
+				if identity == podName {
+					return
+				}
+				log.Printf("New leader elected: %s", identity)
+			},
+		},
+		ReleaseOnCancel: true,
+	}
+
+	// 运行选主
+	leaderelection.RunOrDie(ctx, leaderElectionConfig)
+}
+
+func startHealthServer() {
+	mux := http.NewServeMux()
+
+	// 存活探针
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// 就绪探针
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	log.Println("Starting health check server on :8080")
+
+	if err := server.ListenAndServe(); err != nil {
+		log.Printf("Health check server error: %v", err)
+	}
 }
 
 func main() {
@@ -435,8 +545,11 @@ func main() {
 	// 处理系统信号
 	handleSignals(cancel)
 
-	// 启动监控
-	log.Println("Node zombie detector starting...")
-	monitor.Start(ctx)
+	// 启动健康检查服务器
+	go startHealthServer()
+
+	// 启动监控（带选主）
+	log.Println("Node zombie detector starting with leader election...")
+	runWithLeaderElection(ctx, monitor)
 	log.Println("Node zombie detector stopped")
 }
