@@ -41,7 +41,6 @@ func init() {
 type NodeStatus struct {
 	LastSeenWithMetrics time.Time
 	LastAlertTime       time.Time
-	AlertCount          int // 告警次数统计
 }
 
 const (
@@ -240,7 +239,6 @@ func (m *Monitor) getOrCreateNodeStatus(
 		status = &NodeStatus{
 			LastSeenWithMetrics: time.Now(),
 			LastAlertTime:       time.Time{}, // 零值
-			AlertCount:          0,
 		}
 		nodeStatus[nodeName] = status
 	}
@@ -289,12 +287,9 @@ func (m *Monitor) checkNode(
 		return nil
 	}
 
-	err := m.sendAlert(ctx, nodeName, timeSinceLastMetrics, status)
-
 	status.LastAlertTime = time.Now()
-	status.AlertCount++
 
-	return err
+	return m.sendAlert(ctx, nodeName, timeSinceLastMetrics)
 }
 
 // isNodeReady 检查节点是否处于 Ready 状态
@@ -317,58 +312,35 @@ type FeishuMessage struct {
 const alertFormat = "⚠️ 节点监控告警\n\n" +
 	"节点名称: %s\n" +
 	"问题描述: 节点状态为 Ready，但已经 %v 没有资源指标数据\n" +
-	"可能原因: \n" +
-	" 1. 节点上的 kubelet 可能已经卡死\n" +
-	" 2. 节点与 metrics-server 通信异常\n" +
-	" 3. 节点资源耗尽导致无法上报指标\n" +
-	"建议操作: \n" +
-	" 1. 检查节点 kubelet 状态\n" +
-	" 2. 查看节点系统日志\n" +
-	" 3. 考虑重启节点或迁移工作负载\n" +
-	"告警时间: %s\n" +
-	"告警次数: 第 %d 次"
+	"告警时间: %s\n"
 
 const alertFormatWithCluster = "⚠️ 节点监控告警\n\n" +
 	"集群名称: %s\n" +
 	"节点名称: %s\n" +
 	"问题描述: 节点状态为 Ready，但已经 %v 没有资源指标数据\n" +
-	"可能原因: \n" +
-	" 1. 节点上的 kubelet 可能已经卡死\n" +
-	" 2. 节点与 metrics-server 通信异常\n" +
-	" 3. 节点资源耗尽导致无法上报指标\n" +
-	"建议操作: \n" +
-	" 1. 检查节点 kubelet 状态\n" +
-	" 2. 查看节点系统日志\n" +
-	" 3. 考虑重启节点或迁移工作负载\n" +
-	"告警时间: %s\n" +
-	"告警次数: 第 %d 次"
+	"告警时间: %s\n"
 
 // sendAlert 发送飞书告警
 func (m *Monitor) sendAlert(
 	ctx context.Context,
 	nodeName string,
 	duration time.Duration,
-	status *NodeStatus,
 ) error {
-	alertCount := status.AlertCount + 1
-
 	var message string
 	if m.clusterName != "" {
 		message = fmt.Sprintf(
 			alertFormatWithCluster,
 			m.clusterName,
 			nodeName,
-			duration.Round(time.Second),
+			duration.Round(time.Second).String(),
 			time.Now().Format(time.DateTime),
-			alertCount,
 		)
 	} else {
 		message = fmt.Sprintf(
 			alertFormat,
 			nodeName,
-			duration.Round(time.Second),
+			duration.Round(time.Second).String(),
 			time.Now().Format(time.DateTime),
-			alertCount,
 		)
 	}
 
