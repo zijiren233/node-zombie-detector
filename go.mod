@@ -3,9 +3,9 @@ module node-zombie-detector
 go 1.24.5
 
 require (
-	k8s.io/api v0.33.3
-	k8s.io/apimachinery v0.33.3
-	k8s.io/client-go v0.33.3
+	k8s.io/api v0.33.4
+	k8s.io/apimachinery v0.33.4
+	k8s.io/client-go v0.33.4
 	k8s.io/metrics v0.33.3
 )
 
